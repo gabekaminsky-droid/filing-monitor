@@ -1,8 +1,3 @@
-bash
-
-cat /mnt/user-data/outputs/fara_lda_monitor.py
-Output
-
 #!/usr/bin/env python3
 """
 FARA + LDA Filing Monitor
