@@ -752,7 +752,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-Done
-Select all the text in the GitHub editor and paste this — it's the full script. Press Command + A in the GitHub editor first to make sure it's empty, then Command + V to paste.
-
-After pasting click the green Commit changes button top right, then Commit changes again in the popup.
