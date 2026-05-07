@@ -1,3 +1,8 @@
+bash
+
+cat /mnt/user-data/outputs/fara_lda_monitor.py
+Output
+
 #!/usr/bin/env python3
 """
 FARA + LDA Filing Monitor
@@ -31,16 +36,39 @@ log = logging.getLogger(__name__)
 #  YOUR WATCHLIST
 # ─────────────────────────────────────────────
 
+# FARA: Firm names to monitor as registrants
 FARA_REGISTRANT_NAMES = [
-    "Mercury Public Affairs",
     "Ballard Partners",
+    "Mercury Public Affairs",
+    "BGR",
+    "Akin Gump",
+    "Brownstein Hyatt",
+    "Miller Strategies LLC",
     "Checkmate Government Relations",
     "Continental Strategy",
-    "Miller Strategies LLC",
     "Tactic COC",
-    "BGR",
+    "DCI Group",
+    "Cornerstone Government Affairs",
+    "Holland & Knight",
+    "Williams & Jensen",
+    "Invariant",
+    "Drake Ventures",
+    "Cassidy & Associates",
+    "Harbinger Strategies",
 ]
 
+# FARA: Individual people to monitor as registrants
+FARA_INDIVIDUAL_REGISTRANTS = [
+    "Roger Stone",
+    "Paul Manafort",
+    "Brian Ballard",
+    "Jeff Miller",
+    "Jason Miller",
+    "Brett Tolman",
+    "Robert Stryker",
+]
+
+# FARA: Countries to monitor as foreign principals
 FARA_COUNTRIES = [
     "Qatar",
     "Saudi Arabia",
@@ -50,18 +78,36 @@ FARA_COUNTRIES = [
     "Venezuela",
     "Iran",
     "India",
+    "Nigeria",
+    "Ukraine",
+    "Kazakhstan",
+    "Turkey",
+    "China",
+    "Russia",
 ]
 
+# LDA: Lobbying firm names to monitor as registrants
 LDA_REGISTRANT_NAMES = [
-    "Mercury Public Affairs",
     "Ballard Partners",
+    "Mercury Public Affairs",
+    "BGR Group",
+    "Akin Gump",
+    "Brownstein Hyatt",
+    "Miller Strategies LLC",
     "Checkmate Government Relations",
     "Continental Strategy",
-    "Miller Strategies LLC",
     "Tactic COC",
-    "BGR Group",
+    "DCI Group",
+    "Cornerstone Government Affairs",
+    "Holland & Knight",
+    "Williams & Jensen",
+    "Invariant",
+    "Drake Ventures",
+    "Cassidy & Associates",
+    "Harbinger Strategies",
 ]
 
+# LDA: Client/company names to monitor
 LDA_CLIENT_NAMES = [
     "OpenAI",
     "Anthropic",
@@ -72,11 +118,18 @@ LDA_CLIENT_NAMES = [
     "Cantor Fitzgerald",
 ]
 
+# LDA: Individual lobbyist names to monitor
 LDA_LOBBYIST_NAMES = [
-    "Jason Miller",
     "Roger Stone",
+    "Jason Miller",
     "Robert Stryker",
     "Brett Tolman",
+    "Paul Manafort",
+    "Brian Ballard",
+    "Jeff Miller",
+    "Corey Lewandowski",
+    "David Urban",
+    "Tom Barrack",
 ]
 
 # ─────────────────────────────────────────────
@@ -110,7 +163,10 @@ def save_state(state):
 # ─────────────────────────────────────────────
 
 def name_matches(actual_name, watchlist_names):
-    """Strict matching — watchlist term must appear as meaningful phrase."""
+    """
+    Strict matching: watchlist term must appear as a meaningful phrase.
+    Short terms require exact full match to avoid noise.
+    """
     actual = (actual_name or "").lower().strip()
     for term in watchlist_names:
         t = term.lower().strip()
@@ -132,7 +188,6 @@ def strip_markdown(text):
     return text.strip()
 
 def format_amount(income, expenses):
-    """Format dollar amount with bold styling."""
     if income:
         try:
             return "${:,.0f}".format(float(income))
@@ -205,12 +260,19 @@ def get_new_fara_filings(seen_ids):
         country    = (row.get("ForeignPrincipalCountryOfFormation", "") or
                       row.get("Country", "") or "")
 
-        name_match    = name_matches(registrant, FARA_REGISTRANT_NAMES)
-        country_match = name_matches(country, FARA_COUNTRIES)
+        firm_match       = name_matches(registrant, FARA_REGISTRANT_NAMES)
+        individual_match = name_matches(registrant, FARA_INDIVIDUAL_REGISTRANTS)
+        country_match    = name_matches(country, FARA_COUNTRIES)
 
-        if name_match or country_match:
+        if firm_match or individual_match or country_match:
             row["_doc_id"]     = doc_id
             row["_filed_date"] = filed_date.isoformat()
+            if individual_match:
+                row["_match_type"] = "individual"
+            elif firm_match:
+                row["_match_type"] = "firm"
+            else:
+                row["_match_type"] = "country"
             new_filings.append(row)
 
     log.info("Found {} new FARA filings matching watchlist".format(len(new_filings)))
@@ -231,7 +293,7 @@ def fetch_fara_pdf_url(row):
 LDA_API_BASE = "https://lda.senate.gov/api/v1"
 
 def lda_search(params):
-    """Single page — never paginates to avoid pulling years of history."""
+    """Single page search — never paginates to avoid pulling years of history."""
     url = "{}/filings/".format(LDA_API_BASE)
     params = dict(params)
     params["page_size"] = 25
@@ -248,17 +310,15 @@ def get_new_lda_filings(seen_ids):
     cutoff = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     seen = set(seen_ids)
 
-    # We return 3 separate lists for 3 separate email sections
-    lda_firm_filings      = []  # matched by registrant firm name
-    lda_company_filings   = []  # matched by client company name
-    lda_lobbyist_filings  = []  # matched by individual lobbyist name
+    lda_firm_filings     = []
+    lda_company_filings  = []
+    lda_lobbyist_filings = []
 
     def add_results(rows, match_type, target_list, check_field=None, watchlist=None):
         for row in rows:
             fid = str(row.get("filing_uuid", ""))
             if not fid or fid in seen:
                 continue
-            # Strict name check
             if check_field and watchlist:
                 if check_field == "registrant":
                     actual = row.get("registrant", {}).get("name", "")
@@ -276,18 +336,18 @@ def get_new_lda_filings(seen_ids):
         rows = lda_search({"registrant_name": name, "filing_date_after": cutoff})
         add_results(rows, "registrant:{}".format(name),
                     lda_firm_filings, "registrant", LDA_REGISTRANT_NAMES)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     for name in LDA_CLIENT_NAMES:
         rows = lda_search({"client_name": name, "filing_date_after": cutoff})
         add_results(rows, "client:{}".format(name),
                     lda_company_filings, "client", LDA_CLIENT_NAMES)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     for name in LDA_LOBBYIST_NAMES:
         rows = lda_search({"lobbyist_name": name, "filing_date_after": cutoff})
         add_results(rows, "lobbyist:{}".format(name), lda_lobbyist_filings)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     log.info("LDA: {} firm, {} company, {} lobbyist filings".format(
         len(lda_firm_filings), len(lda_company_filings), len(lda_lobbyist_filings)))
@@ -301,14 +361,14 @@ def get_new_lda_filings(seen_ids):
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 FARA_SYSTEM = """You are an expert analyst covering foreign lobbying for an investigative journalist.
-Write a tight, plain-text summary (no markdown, no asterisks, no bullet points, no headers).
-Extract and state clearly: the registrant firm, foreign principal, country, compensation/retainer amount,
-scope of services, government contacts targeted, and any notable political activity.
+Write a tight plain-text summary with no markdown, no asterisks, no bullet points, no headers.
+Extract and state clearly: registrant name, foreign principal, country, compensation amount,
+scope of services, government contacts targeted, and any notable political activity or conflicts of interest.
 Flag anything unusual or newsworthy. 3-5 sentences. Start directly with the facts."""
 
 LDA_SYSTEM = """You are an expert analyst covering lobbying disclosures for an investigative journalist.
-Write a tight, plain-text summary (no markdown, no asterisks, no bullet points, no headers).
-Extract and state clearly: the lobbying firm, client name, dollar amount, specific issues lobbied,
+Write a tight plain-text summary with no markdown, no asterisks, no bullet points, no headers.
+Extract and state clearly: lobbying firm, client, dollar amount, specific issues lobbied,
 bills or agencies targeted, lobbyist names, any foreign entity connections, and revolving-door hires.
 Flag anything notable or unusual. 3-5 sentences. Start directly with the facts."""
 
@@ -321,6 +381,7 @@ FARA Filing:
 - Country: {}
 - Document Type: {}
 - Date Filed: {}
+- Match Type: {}
 """.format(
         row.get("Registrant", "Unknown"),
         row.get("RegistrationNumber", "Unknown"),
@@ -328,6 +389,7 @@ FARA Filing:
         row.get("ForeignPrincipalCountryOfFormation", row.get("Country", "Unknown")),
         row.get("DocType", "Unknown"),
         row.get("_filed_date", "Unknown"),
+        row.get("_match_type", "Unknown"),
     )
 
     pdf_content = []
@@ -422,7 +484,7 @@ LOBBYISTS: {}
 def filing_card(title, subtitle, amount, analysis, link, accent_color):
     amount_html = ""
     if amount:
-        amount_html = '<span style="display:inline-block;background:{color};color:white;font-weight:700;font-size:13px;padding:2px 10px;border-radius:12px;margin-bottom:8px;">{amount}</span>'.format(
+        amount_html = '<div style="margin:6px 0;"><span style="background:{color};color:white;font-weight:700;font-size:13px;padding:3px 12px;border-radius:12px;">{amount}</span></div>'.format(
             color=accent_color, amount=amount)
 
     link_html = ""
@@ -431,10 +493,10 @@ def filing_card(title, subtitle, amount, analysis, link, accent_color):
 
     return """
     <div style="background:#ffffff;border:1px solid #e8e8e8;border-radius:8px;padding:18px 20px;margin:12px 0;border-left:4px solid {accent};">
-        <div style="font-weight:700;font-size:16px;color:#111;letter-spacing:-0.2px;">{title}</div>
-        <div style="font-size:12px;color:#777;margin:3px 0 10px;text-transform:uppercase;letter-spacing:0.5px;">{subtitle}</div>
+        <div style="font-weight:700;font-size:16px;color:#111;">{title}</div>
+        <div style="font-size:12px;color:#888;margin:3px 0 8px;text-transform:uppercase;letter-spacing:0.5px;">{subtitle}</div>
         {amount_html}
-        <div style="font-size:14px;color:#333;line-height:1.7;margin-top:6px;">{analysis}</div>
+        <div style="font-size:14px;color:#333;line-height:1.7;margin-top:8px;">{analysis}</div>
         <div style="margin-top:12px;">{link_html}</div>
     </div>""".format(
         accent=accent_color,
@@ -447,23 +509,20 @@ def filing_card(title, subtitle, amount, analysis, link, accent_color):
 
 def section_header(emoji, title, count, color):
     return """
-    <div style="margin-top:36px;margin-bottom:4px;border-bottom:2px solid {color};padding-bottom:8px;">
+    <div style="margin-top:36px;margin-bottom:4px;padding-bottom:8px;border-bottom:2px solid {color};">
         <span style="font-size:18px;font-weight:800;color:#111;">{emoji} {title}</span>
-        <span style="font-size:13px;color:#888;margin-left:8px;font-weight:400;">{count} filing{s}</span>
+        <span style="font-size:13px;color:#888;margin-left:8px;">{count} filing{s} today</span>
     </div>""".format(
-        color=color,
-        emoji=emoji,
-        title=title,
-        count=count,
-        s="s" if count != 1 else "",
-    )
+        color=color, emoji=emoji, title=title,
+        count=count, s="s" if count != 1 else "")
 
 def empty_section():
-    return '<p style="color:#aaa;font-size:13px;padding:8px 0 16px;">No new filings today.</p>'
+    return '<p style="color:#bbb;font-size:13px;padding:8px 0 16px;font-style:italic;">No new filings today.</p>'
 
 def build_email_html(fara_items, lda_firm_items, lda_company_items, lda_lobbyist_items):
-    today_str  = date.today().strftime("%A, %B %d, %Y")
-    total      = len(fara_items) + len(lda_firm_items) + len(lda_company_items) + len(lda_lobbyist_items)
+    today_str = date.today().strftime("%A, %B %d, %Y")
+    total = (len(fara_items) + len(lda_firm_items) +
+             len(lda_company_items) + len(lda_lobbyist_items))
 
     # ── FARA section ──
     fara_html = section_header("🌐", "FARA — Foreign Agent Filings", len(fara_items), "#c0392b")
@@ -479,16 +538,9 @@ def build_email_html(fara_items, lda_firm_items, lda_company_items, lda_lobbyist
                 doc=doc_type,
                 country=country,
                 princ=" &bull; " + principal + " " if principal else " ",
-                filed=filed,
-            )
-            fara_html += filing_card(
-                title=registrant,
-                subtitle=subtitle,
-                amount=None,
-                analysis=item.get("_analysis", ""),
-                link=link,
-                accent_color="#c0392b",
-            )
+                filed=filed)
+            fara_html += filing_card(registrant, subtitle, None,
+                                     item.get("_analysis", ""), link, "#c0392b")
     else:
         fara_html += empty_section()
 
@@ -506,14 +558,8 @@ def build_email_html(fara_items, lda_firm_items, lda_company_items, lda_lobbyist
             link        = "https://lda.senate.gov/filings/public/filing/{}/print/".format(uuid) if uuid else None
             subtitle    = "{ftype} &bull; {client} &bull; {period} {year}".format(
                 ftype=ftype, client=client_name, period=period, year=year)
-            lda_html += filing_card(
-                title=registrant,
-                subtitle=subtitle,
-                amount=amount,
-                analysis=item.get("_analysis", ""),
-                link=link,
-                accent_color="#2471a3",
-            )
+            lda_html += filing_card(registrant, subtitle, amount,
+                                    item.get("_analysis", ""), link, "#2471a3")
     else:
         lda_html += empty_section()
 
@@ -521,24 +567,18 @@ def build_email_html(fara_items, lda_firm_items, lda_company_items, lda_lobbyist
     company_html = section_header("🏢", "Companies to Watch", len(lda_company_items), "#1e8449")
     if lda_company_items:
         for item in lda_company_items:
-            registrant  = item.get("registrant", {}).get("name", "Unknown Firm")
             client_name = item.get("client", {}).get("name", "Unknown Client")
+            registrant  = item.get("registrant", {}).get("name", "Unknown Firm")
             period      = item.get("filing_period_display", item.get("filing_period", ""))
             year        = item.get("filing_year", "")
             ftype       = item.get("filing_type_display", item.get("filing_type", ""))
             amount      = format_amount(item.get("income"), item.get("expenses"))
             uuid        = item.get("filing_uuid", "")
             link        = "https://lda.senate.gov/filings/public/filing/{}/print/".format(uuid) if uuid else None
-            subtitle    = "{ftype} &bull; Lobbied by: {reg} &bull; {period} {year}".format(
+            subtitle    = "{ftype} &bull; Lobbied by {reg} &bull; {period} {year}".format(
                 ftype=ftype, reg=registrant, period=period, year=year)
-            company_html += filing_card(
-                title=client_name,
-                subtitle=subtitle,
-                amount=amount,
-                analysis=item.get("_analysis", ""),
-                link=link,
-                accent_color="#1e8449",
-            )
+            company_html += filing_card(client_name, subtitle, amount,
+                                        item.get("_analysis", ""), link, "#1e8449")
     else:
         company_html += empty_section()
 
@@ -553,72 +593,57 @@ def build_email_html(fara_items, lda_firm_items, lda_company_items, lda_lobbyist
             ftype       = item.get("filing_type_display", item.get("filing_type", ""))
             amount      = format_amount(item.get("income"), item.get("expenses"))
             match_type  = item.get("_match_type", "")
-            lobbyist_name = match_type.replace("lobbyist:", "") if "lobbyist:" in match_type else ""
+            lobbyist_name = match_type.replace("lobbyist:", "") if "lobbyist:" in match_type else "Unknown"
             uuid        = item.get("filing_uuid", "")
             link        = "https://lda.senate.gov/filings/public/filing/{}/print/".format(uuid) if uuid else None
-            title       = "{lobbyist} &mdash; {firm} / {client}".format(
-                lobbyist=lobbyist_name, firm=registrant, client=client_name)
+            title       = "{} &mdash; {} / {}".format(lobbyist_name, registrant, client_name)
             subtitle    = "{ftype} &bull; {period} {year}".format(
                 ftype=ftype, period=period, year=year)
-            lobbyist_html += filing_card(
-                title=title,
-                subtitle=subtitle,
-                amount=amount,
-                analysis=item.get("_analysis", ""),
-                link=link,
-                accent_color="#7d3c98",
-            )
+            lobbyist_html += filing_card(title, subtitle, amount,
+                                         item.get("_analysis", ""), link, "#7d3c98")
     else:
         lobbyist_html += empty_section()
 
     return """<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#f4f4f4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<body style="margin:0;padding:0;background:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<div style="max-width:680px;margin:24px auto;padding:0 16px 40px;">
 
-  <div style="max-width:680px;margin:24px auto;background:#f4f4f4;padding:0 16px 40px;">
-
-    <!-- Header -->
-    <div style="background:#111;border-radius:8px;padding:24px 28px;margin-bottom:8px;">
-      <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px;">Daily Filing Monitor</div>
-      <div style="font-size:22px;font-weight:800;color:#ffffff;margin-bottom:8px;">{today}</div>
-      <div style="font-size:15px;color:#ccc;line-height:1.5;">
-        Good morning, Gabe. Here is your daily filings digest.<br>
-        <span style="color:#ffffff;font-weight:600;">{total} new filing{s}</span> across 4 categories today.
-      </div>
+  <!-- Header -->
+  <div style="background:#111;border-radius:8px;padding:24px 28px;margin-bottom:12px;">
+    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px;">Daily Filing Monitor</div>
+    <div style="font-size:24px;font-weight:800;color:#fff;margin-bottom:10px;">{today}</div>
+    <div style="font-size:15px;color:#ccc;line-height:1.6;">
+      Good morning, Gabe. Here is your daily filings digest.<br>
+      <span style="color:#fff;font-weight:700;">{total} new filing{s}</span> across 4 categories today.
     </div>
-
-    <!-- Quick count bar -->
-    <div style="background:#fff;border-radius:8px;padding:14px 20px;margin-bottom:4px;display:flex;gap:16px;border:1px solid #e8e8e8;">
-      <span style="font-size:13px;color:#555;">🌐 FARA: <strong style="color:#c0392b;">{fara_count}</strong></span>
-      &nbsp;&nbsp;
-      <span style="font-size:13px;color:#555;">🏛️ LDA Firms: <strong style="color:#2471a3;">{lda_count}</strong></span>
-      &nbsp;&nbsp;
-      <span style="font-size:13px;color:#555;">🏢 Companies: <strong style="color:#1e8449;">{company_count}</strong></span>
-      &nbsp;&nbsp;
-      <span style="font-size:13px;color:#555;">👤 Lobbyists: <strong style="color:#7d3c98;">{lobbyist_count}</strong></span>
-    </div>
-
-    <!-- FARA -->
-    {fara_html}
-
-    <!-- LDA Firms -->
-    {lda_html}
-
-    <!-- Companies -->
-    {company_html}
-
-    <!-- Individual Lobbyists -->
-    {lobbyist_html}
-
-    <!-- Footer -->
-    <div style="margin-top:32px;padding-top:16px;border-top:1px solid #ddd;font-size:11px;color:#aaa;text-align:center;">
-      Sources: <a href="https://efile.fara.gov" style="color:#aaa;">efile.fara.gov</a> &nbsp;&middot;&nbsp;
-      <a href="https://lda.senate.gov" style="color:#aaa;">lda.senate.gov</a> &nbsp;&middot;&nbsp;
-      AI analysis via Claude (Anthropic)
-    </div>
-
   </div>
+
+  <!-- Count bar -->
+  <div style="background:#fff;border-radius:8px;padding:14px 20px;margin-bottom:4px;border:1px solid #e0e0e0;font-size:13px;color:#555;">
+    <span>🌐 FARA: <strong style="color:#c0392b;">{fara_count}</strong></span>
+    &nbsp;&nbsp;&nbsp;
+    <span>🏛️ LDA Firms: <strong style="color:#2471a3;">{lda_count}</strong></span>
+    &nbsp;&nbsp;&nbsp;
+    <span>🏢 Companies: <strong style="color:#1e8449;">{company_count}</strong></span>
+    &nbsp;&nbsp;&nbsp;
+    <span>👤 Lobbyists: <strong style="color:#7d3c98;">{lobbyist_count}</strong></span>
+  </div>
+
+  {fara_html}
+  {lda_html}
+  {company_html}
+  {lobbyist_html}
+
+  <!-- Footer -->
+  <div style="margin-top:32px;padding-top:16px;border-top:1px solid #ddd;font-size:11px;color:#aaa;text-align:center;">
+    Sources: <a href="https://efile.fara.gov" style="color:#aaa;">efile.fara.gov</a> &nbsp;&middot;&nbsp;
+    <a href="https://lda.senate.gov" style="color:#aaa;">lda.senate.gov</a> &nbsp;&middot;&nbsp;
+    AI analysis via Claude (Anthropic)
+  </div>
+
+</div>
 </body>
 </html>""".format(
         today=today_str,
@@ -695,7 +720,7 @@ def main():
         seen_lda.add(str(filing.get("filing_uuid", "")))
         time.sleep(1)
 
-    # ── Build email ──
+    # ── Build + send email ──
     total = (len(fara_filings) + len(lda_firm_filings) +
              len(lda_company_filings) + len(lda_lobbyist_filings))
     today_str = date.today().strftime("%B %d, %Y")
@@ -708,7 +733,6 @@ def main():
 
     html = build_email_html(fara_filings, lda_firm_filings,
                             lda_company_filings, lda_lobbyist_filings)
-
     try:
         send_email(subject, html)
         log.info("Email sent successfully.")
@@ -728,3 +752,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+Done
+Select all the text in the GitHub editor and paste this — it's the full script. Press Command + A in the GitHub editor first to make sure it's empty, then Command + V to paste.
+
+After pasting click the green Commit changes button top right, then Commit changes again in the popup.
